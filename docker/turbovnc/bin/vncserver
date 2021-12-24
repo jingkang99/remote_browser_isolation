@@ -1,0 +1,1241 @@
+#!/usr/bin/env perl
+#
+#  Copyright (C) 2009-2018, 2020-2021 D. R. Commander.  All Rights Reserved.
+#  Copyright (C) 2010 University Corporation for Atmospheric Research.
+#                     All Rights Reserved.
+#  Copyright (C) 2005-2006 Sun Microsystems, Inc.  All Rights Reserved.
+#  Copyright (C) 2002-2009 Constantin Kaplinsky.  All Rights Reserved.
+#  Copyright (C) 2002-2005 RealVNC Ltd.  All Rights Reserved.
+#  Copyright (C) 1999 AT&T Laboratories Cambridge.  All Rights Reserved.
+#
+#  This is free software; you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 2 of the License, or
+#  (at your option) any later version.
+#
+#  This software is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this software; if not, write to the Free Software
+#  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,
+#  USA.
+#
+
+#
+# vncserver - wrapper script to start the TurboVNC X server.
+#
+
+# First make sure we're operating in a sane environment.
+
+$exedir = "";
+$slashndx = rindex($0, "/");
+if ($slashndx >= 0) {
+  $exedir = substr($0, 0, $slashndx + 1);
+}
+
+# The script looks for the Java classes in $exedir/../java first, then if
+# it can't find them there, it looks in the directory specified by
+# $vncClasses.
+
+$vncClasses = "/opt/TurboVNC/java";
+
+$xauth = "xauth";
+
+&SanityCheck();
+
+# Default configuration of the TurboVNC Server:
+
+$geometry = "1240x900";
+$depth = 24;
+$vncUserDir = "$ENV{HOME}/.vnc";
+$authTypeVNC = 1;
+$authTypeOTP = 1;
+$generateOTP = 0;
+$securityTypes = "";
+$encTypeX509 = 1;
+$enableHTTP = 1;
+$skipxstartup = 0;
+$autoLosslessRefresh = 0.0;
+$deferUpdate = 1;
+$wm = "";
+$useVGL = 0;
+$autokill = 0;
+$pamSession = 0;
+$bits = 64;
+$multiThread = 1;
+$numThreads = 0;
+$serverArgs = "";
+
+# Read configuration from the system-wide and user files if present.
+
+$configFile = "/opt/TurboVNC/etc/turbovncserver.conf";
+ReadConfiguration();
+$configFile = "$ENV{HOME}/.vnc/turbovncserver.conf";
+ReadConfiguration();
+ReadAuthConfiguration("/opt/TurboVNC/etc/turbovncserver-security.conf");
+
+# We set these defaults after reading the configuration file, in case
+# $vncUserDir was modified.
+
+$passwdFile = "$vncUserDir/passwd" if (!$passwdFile);
+$x509CertFile = "$vncUserDir/x509_cert.pem" if (!$x509CertFile);
+$x509KeyFile = "$vncUserDir/x509_private.pem" if (!$x509KeyFile);
+
+# Done reading configuration.
+
+$defaultXStartup = <<'END_XSTARTUP';
+#!/bin/sh
+
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+XDG_SESSION_TYPE=x11;  export XDG_SESSION_TYPE
+
+OS=`uname -s`
+
+# Emulate GDM
+USESTARTUP=0
+if [ -x /usr/bin/gnome-session ]; then
+  # Use Unity 2D on Ubuntu 12 if no WM is specified.  Unity 3D 5.20.x doesn't
+  # even pretend to work properly with our X server.
+  if [ -f /usr/share/gnome-session/sessions/ubuntu-2d.session -a -z "$TVNC_WM" ]; then
+    TVNC_WM=2d
+  fi
+  case "$TVNC_WM" in
+    2d)
+      # Ubuntu 12: ubuntu-2d
+      # Ubuntu 14: gnome-fallback
+      for SESSION in "gnome-fallback" "ubuntu-2d" "2d-gnome"; do
+        if [ -f /usr/share/gnome-session/sessions/$SESSION.session ]; then
+          DESKTOP_SESSION=$SESSION;  export DESKTOP_SESSION
+          XDG_CURRENT_DESKTOP=$SESSION;  export XDG_CURRENT_DESKTOP
+        fi
+      done
+      # RHEL 7, Fedora
+      if [ -f /usr/share/gnome-session/sessions/gnome-classic.session ]; then
+        DESKTOP_SESSION=gnome-classic;  export DESKTOP_SESSION
+        GNOME_SHELL_SESSION_MODE=classic;  export GNOME_SHELL_SESSION_MODE
+        XDG_CURRENT_DESKTOP="GNOME-Classic:GNOME";  export XDG_CURRENT_DESKTOP
+        USESTARTUP=1
+      fi
+      # Ubuntu 16+
+      if [ -f /usr/share/gnome-session/sessions/gnome-flashback-metacity.session ]; then
+        DESKTOP_SESSION=gnome-flashback-metacity;  export DESKTOP_SESSION
+        grep -q "unity" /usr/share/gnome-session/sessions/gnome-flashback-metacity.session && {
+          XDG_CURRENT_DESKTOP="GNOME-Flashback:Unity"
+          export XDG_CURRENT_DESKTOP
+        } || {
+          XDG_CURRENT_DESKTOP="GNOME-Flashback:GNOME"
+          export XDG_CURRENT_DESKTOP
+          GNOME_SHELL_SESSION_MODE=ubuntu;  export GNOME_SHELL_SESSION_MODE
+          USESTARTUP=1
+        }
+      fi
+      unset TVNC_WM
+      ;;
+    *)
+      # This is necessary to make Unity work on Ubuntu 16, and on Ubuntu 14, it
+      # ensures that the proper compiz profile is set up.  Otherwise, if you
+      # accidentally launch Unity in a TurboVNC session that lacks OpenGL
+      # support, compiz will automatically disable its OpenGL plugin, requiring
+      # you to reset the compiz plugin state before Unity will work again.
+      if [ -f /usr/share/gnome-session/sessions/ubuntu.session -a "$TVNC_WM" = "" ]; then
+        DESKTOP_SESSION=ubuntu;  export DESKTOP_SESSION
+        grep -qE "DesktopName\s*=\s*Unity" /usr/share/gnome-session/sessions/ubuntu.session && {
+          XDG_CURRENT_DESKTOP=Unity;  export XDG_CURRENT_DESKTOP
+        } || {
+          XDG_CURRENT_DESKTOP=ubuntu:GNOME;  export XDG_CURRENT_DESKTOP
+          GNOME_SHELL_SESSION_MODE=ubuntu;  export GNOME_SHELL_SESSION_MODE
+          USESTARTUP=1
+        }
+      fi
+      ;;
+  esac
+  if [ "$DESKTOP_SESSION" != "" ]; then
+    GDMSESSION=$DESKTOP_SESSION;  export GDMSESSION
+    SESSIONTYPE=gnome-session;  export SESSIONTYPE
+    STARTUP="/usr/bin/gnome-session --session=$DESKTOP_SESSION"
+    export STARTUP
+  fi
+fi
+
+if [ "$TVNC_VGL" = "1" ]; then
+  if [ -z "$SSH_AGENT_PID" -a -x /usr/bin/ssh-agent ]; then
+    TVNC_SSHAGENT=/usr/bin/ssh-agent
+  fi
+  if [ -z "$TVNC_VGLRUN" ]; then
+    TVNC_VGLRUN="vglrun +wm"
+  fi
+fi
+
+if [ "$STARTUP" != "" -a "$USESTARTUP" = "1" ]; then
+  exec $TVNC_VGLRUN $STARTUP
+fi
+if [ "$TVNC_WM" = "" ]; then
+  # Typical system-wide WM startup script on Linux and Solaris 11
+  if [ -f /etc/X11/xinit/xinitrc ]; then
+    TVNC_WM=/etc/X11/xinit/xinitrc
+  fi
+  # Typical system-wide WM startup script on Solaris 10
+  if [ $OS = 'SunOS' -a -f /usr/dt/config/Xinitrc.jds ]; then
+    TVNC_WM=/usr/dt/config/Xinitrc.jds
+  fi
+  # Typical per-user WM startup script on Solaris 10
+  if [ $OS = 'SunOS' -a -f $HOME/.dt/sessions/lastsession ]; then
+    TVNC_WM=`cat $HOME/.dt/sessions/lastsession`
+  fi
+else
+  TVNC_WM=`which "$TVNC_WM" 2>/dev/null`
+fi
+if [ "$TVNC_WM" != "" ]; then
+  if [ -x "$TVNC_WM" ]; then
+    exec $TVNC_SSHAGENT $TVNC_VGLRUN "$TVNC_WM"
+  else
+    exec $TVNC_SSHAGENT $TVNC_VGLRUN sh "$TVNC_WM"
+  fi
+else
+  echo "No window manager startup script found.  Use the TVNC_WM environment"
+  echo "variable to specify the path to a window manager startup script or"
+  echo "executable.  Falling back to TWM."
+  which twm >/dev/null && {
+    if [ -f $HOME/.Xresources ]; then xrdb $HOME/.Xresources; fi
+    xsetroot -solid grey
+    xterm -geometry 80x24+10+10 -ls -title "$VNCDESKTOP Desktop" &
+    twm
+  } || {
+    echo "TWM not found.  I give up."
+    exit 1
+  }
+fi
+END_XSTARTUP
+
+$xauthorityFile = "$ENV{XAUTHORITY}";
+
+$vncUserDirUnderTmp = ($vncUserDir =~ m|^/tmp/.+|) ? 1 : 0;
+if (!$xstartup) {
+  $xstartup = ($vncUserDirUnderTmp) ?
+    "$ENV{HOME}/.turbovncstartup" : "$vncUserDir/xstartup.turbovnc";
+}
+unless ($xauthorityFile) {
+  if ($vncUserDirUnderTmp) {
+    $xauthorityFile = "$vncUserDir/.Xauthority";
+  } else {
+    $xauthorityFile = "$ENV{HOME}/.Xauthority";
+  }
+}
+
+chop($host = `uname -n`);
+chop($os = `uname`);
+
+if (-d "/etc/X11/fontpath.d") {
+  $fontPath = "catalogue:/etc/X11/fontpath.d";
+}
+
+@fontpaths = ('/usr/share/X11/fonts', '/usr/share/fonts',
+              '/usr/share/fonts/X11', '/usr/local/lib/X11/fonts');
+if (! -l "/usr/lib/X11") { push(@fontpaths, '/usr/lib/X11/fonts'); }
+if (! -l "/usr/X11") { push(@fontpaths, '/usr/X11/lib/X11/fonts'); }
+if (! -l "/usr/openwin") { push(@fontpaths, '/usr/openwin/lib/X11/fonts'); }
+if (! -l "/usr/X11R6") { push(@fontpaths, '/usr/X11R6/lib/X11/fonts'); }
+if (! -l "/opt/X11/share/fonts") { push(@fontpaths, '/opt/X11/share/fonts'); }
+push(@fontpaths, '/usr/share/fonts/default');
+
+@fonttypes = ('F3bitmaps',
+              'misc',
+              '75dpi',
+              '100dpi',
+              'Speedo',
+              'Type1',
+              'ghostscript',
+              'liberation',
+              'TTF',
+              'OTF');
+
+if (($fontPath eq "")) {
+  foreach $_fpath (@fontpaths) {
+    if (-f "$_fpath/encodings/encodings.dir") {
+      $ENV{FONT_ENCODINGS_DIRECTORY} = "$_fpath/encodings";
+    }
+    foreach $_ftype (@fonttypes) {
+      if (-f "$_fpath/$_ftype/fonts.dir") {
+        if (! -l "$_fpath/$_ftype") {
+          $fontPath .= "$_fpath/$_ftype,";
+        }
+      }
+    }
+  }
+}
+if ($fontPath) {
+  if (substr($fontPath, -1, 1) eq ',') {
+    chop $fontPath;
+  }
+}
+
+if ($os eq "SunOS") {
+  $defFontPath = "inet/:7100";
+} else {
+  $defFontPath = "unix/:7100";
+}
+
+if ($os eq "Darwin") {
+  $fontPath = "$fontPath,/Library/Fonts,/System/Library/Fonts";
+}
+
+@xkbdirs = ('/usr/X11R6/lib/X11/xkb', '/usr/local/share/X11/xkb',
+            '/opt/X11/share/X11/xkb');
+foreach $_xkbdir (@xkbdirs) {
+  if (-d "$_xkbdir") {
+    $xkbdir = "$_xkbdir";
+  }
+}
+
+@xkbcompdirs = ('/usr/X11R6/bin', '/usr/X11/lib/X11/xkb', '/usr/local/bin',
+                '/opt/X11/bin');
+foreach $_xkbcompdir (@xkbcompdirs) {
+  if (-x "$_xkbcompdir/xkbcomp") {
+    $xkbcompdir = "$_xkbcompdir";
+  }
+}
+
+if ($bits eq "64") {
+  @dridirs = ('/usr/lib64/dri', '/usr/lib/dri',
+              '/usr/lib/x86_64-linux-gnu/dri',
+              '/usr/lib/xorg/modules/dri/amd64',
+              '/usr/lib/powerpc64-linux-gnu/dri',
+              '/usr/lib/powerpc64le-linux-gnu/dri',
+              '/usr/lib/aarch64-linux-gnu/dri');
+} else {
+  @dridirs = ('/usr/lib/dri', '/usr/lib32/dri', '/usr/lib/i386-linux-gnu/dri',
+              '/usr/lib/xorg/modules/dri', '/usr/lib/arm-linux-gnueabihf/dri',
+              '/usr/lib/arm-linux-gnueabi/dri');
+}
+push(@dridirs, '/usr/local/lib/dri');
+foreach $_dridir (@dridirs) {
+  if (-f "$_dridir/swrast_dri.so") {
+    $dridir = "$_dridir";
+    last;
+  }
+}
+
+@registrydirs = ('/usr/lib/xorg');
+if ($bits eq "64") {
+  push(@registrydirs, '/usr/lib64/xorg');
+}
+push(@registrydirs, '/usr/local/lib/xorg');
+push(@registrydirs, '/opt/X11/lib/xorg');
+foreach $_registrydir (@registrydirs) {
+  if (-f "$_registrydir/protocol.txt") {
+    $registrydir = "$_registrydir";
+    last;
+  }
+}
+
+# Check command line options
+
+&ParseOptions("-geometry", 1, "-depth", 1, "-pixelformat", 1, "-name", 1,
+              "-kill", 1, "-help", 0, "-h", 0, "--help", 0, "-fg", 0,
+              "-list", 0, "-fp", 1, "-otp", 0, "-securitytypes", 1,
+              "-nohttp", 0, "-nohttpd", 0, "-rfbauth", 1, "-noxstartup", 0,
+              "-xstartup", 1, "-log", 1, "-3dwm", 0, "-vgl", 0, "-debug", 0,
+              "-x509cert", 1, "-x509key", 1, "-autokill", 0, "-quiet", 0,
+              "-wm", 1);
+
+&Usage() if ($opt{'-help'} || $opt{'-h'} || $opt{'--help'});
+
+&Kill() if ($opt{'-kill'});
+
+&List() if ($opt{'-list'});
+
+# Uncomment this line if you want default geometry, depth and pixelformat
+# to match the current X display:
+# &GetXDisplayDefaults();
+
+if ($opt{'-geometry'}) {
+  $geometry = $opt{'-geometry'};
+}
+if ($opt{'-depth'}) {
+  $depth = $opt{'-depth'};
+  $pixelformat = "";
+}
+if ($opt{'-pixelformat'}) {
+  $pixelformat = $opt{'-pixelformat'};
+}
+if ($opt{'-nohttp'}) {
+  $enableHTTP = 0;
+}
+if ($opt{'-nohttpd'}) {
+  $enableHTTP = 0;
+}
+if ($opt{'-noxstartup'}) {
+  $skipxstartup = 1;
+}
+if ($opt{'-xstartup'}) {
+  $xstartup = $opt{'-xstartup'};
+}
+if ($opt{'-wm'}) {
+  $wm = $opt{'-wm'};
+}
+if ($opt{'-3dwm'} || $opt{'-vgl'}) {
+  $useVGL = 1;
+}
+if ($opt{'-fp'}) {
+  $fontPath = $opt{'-fp'};
+}
+if ($opt{'-deferupdate'}) {
+  $deferUpdate = $opt{'-deferupdate'};
+}
+if ($opt{'-debug'}) {
+  $opt{'-fg'} = 1;
+}
+if ($opt{'-autokill'}) {
+  $autokill = 1;
+}
+$authTypeVNCPermitted = $authTypeVNC;
+$encTypeX509Permitted = $encTypeX509;
+if ($opt{'-securitytypes'}) {
+  $securityTypes = $opt{'-securitytypes'};
+}
+if ($securityTypes) {
+  my $enableVNC = 0;
+  my $enableOTP = 0;
+  my $enableX509 = 0;
+  my $secTypes = $securityTypes;
+  $secTypes =~ s/[\t\ \r\n]//g;
+  foreach $tok (split/[,=]/, $secTypes) {
+    if (substr(lc $tok, -3) eq 'otp') {
+      $enableOTP = 1;
+    }
+    if (substr(lc $tok, -3) eq 'vnc') {
+      $enableVNC = 1;
+    }
+    if (substr(lc $tok, 0, 4) eq 'x509') {
+      $enableX509 = 1;
+    }
+  }
+  if ($enableVNC == 0) {
+    $authTypeVNC = 0;
+  }
+  if ($enableOTP == 0) {
+    $authTypeOTP = 0;
+  }
+  if ($enableX509 == 0) {
+    $encTypeX509 = 0;
+  }
+}
+if ($opt{'-rfbauth'}) {
+  if ($authTypeVNC) {
+    $passwdFile = $opt{'-rfbauth'};
+  } else {
+    if ($authTypeVNCPermitted) {
+      print ("VNC Password auth is not enabled.  Ignoring -rfbauth.\n");
+    } else {
+      print ("VNC Password auth is not permitted on this system.  Ignoring -rfbauth.\n");
+    }
+  }
+}
+if ($opt{'-x509cert'}) {
+  if ($encTypeX509) {
+    $x509CertFile = $opt{'-x509cert'};
+  } else {
+    if ($encTypeX509Permitted) {
+      print ("X509 encryption is not enabled.  Ignoring -x509cert.\n");
+    } else {
+      print ("X509 encryption is not permitted on this system.  Ignoring -x509cert.\n");
+    }
+  }
+}
+if ($opt{'-x509key'}) {
+  if ($encTypeX509) {
+    $x509KeyFile = $opt{'-x509key'};
+  } else {
+    if ($encTypeX509Permitted) {
+      print ("X509 encryption is not enabled.  Ignoring -x509key.\n");
+    } else {
+      print ("X509 encryption is not permitted on this system.  Ignoring -x509key.\n");
+    }
+  }
+}
+if ($opt{'-otp'}) {
+  $generateOTP = 1;
+}
+
+if ($generateOTP && $authTypeOTP == 0) {
+  print ("One-Time Password authentication is not enabled.  Ignoring request to generate\n");
+  print ("    initial OTP.\n");
+  $generateOTP = 0;
+}
+
+&CheckGeometryAndDepth();
+
+# Create the user's vnc directory if necessary.
+
+unless (-e $vncUserDir) {
+  unless (mkdir($vncUserDir, 0700)) {
+    die "$prog: Could not create $vncUserDir.\n";
+  }
+}
+($z, $z, $mode) = lstat("$vncUserDir");
+if (! -d _ || ! -o _ || ($vncUserDirUnderTmp && ($mode & 0777) != 0700)) {
+  die "$prog: Wrong type or access mode of $vncUserDir.\n";
+}
+
+# Make sure the user has a password.
+if ($authTypeVNC && "$passwdFile" eq "$vncUserDir/passwd") {
+  ($z, $z, $mode) = lstat("$vncUserDir/passwd");
+  if (-e _ && (! -f _ || ! -o _ || ($mode & 077) != 0)) {
+    die "$prog: Wrong type, ownership, or permissions on\n           $vncUserDir/passwd.\n";
+  }
+
+  if (! -e _) {
+    if ($opt{'-quiet'}) {
+      warn "$vncUserDir/passwd does not exist.\nRun ".$exedir."vncpasswd to create passwd file.\n";
+      exit 1;
+    } else {
+      warn "\nYou will require a password to access your desktops.\n\n";
+      system($exedir."vncpasswd $vncUserDir/passwd");
+      if (($? & 0xFF00) != 0) {
+        exit 1;
+      }
+    }
+  }
+}
+
+# Find display number.
+
+if ((@ARGV > 0) && ($ARGV[0] =~ /^:(\d+)$/)) {
+  $displayNumber = $1;
+  shift(@ARGV);
+  unless (&CheckDisplayNumber($displayNumber)) {
+    die "A VNC server is already running as :$displayNumber\n";
+  }
+} elsif ((@ARGV > 0) && ($ARGV[0] !~ /^-/) && ($ARGV[0] !~ /^\+/)) {
+  &Usage();
+} else {
+  $displayNumber = &GetDisplayNumber();
+}
+
+$vncPort = 5900 + $displayNumber;
+
+if ($opt{'-log'}) {
+  $desktopLog = $opt{'-log'};
+} else {
+  $desktopLog = "$vncUserDir/$host:$displayNumber.log";
+}
+unlink($desktopLog);
+
+if ($opt{'-name'}) {
+  $desktopName = $opt{'-name'};
+} else {
+  $desktopName = "TurboVNC: $host:$displayNumber ($ENV{USER})" unless($desktopName);
+}
+
+# Make an X server cookie - use /dev/urandom on systems that have it,
+# otherwise use perl's random number generator, seeded with the sum
+# of the current time, our PID and part of the encrypted form of the password.
+
+my $cookie = "";
+if (open(URANDOM, '<', '/dev/urandom')) {
+  my $randata;
+  if (sysread(URANDOM, $randata, 16) == 16) {
+    $cookie = unpack 'h*', $randata;
+  }
+  close(URANDOM);
+}
+if ($cookie eq "") {
+  if (-e "$vncUserDir/passwd") {
+    srand(time + $$ + unpack("L", `cat $vncUserDir/passwd`));
+  } else {
+    srand(time + $$);
+  }
+  for (1..16) {
+    $cookie .= sprintf("%02x", int(rand(256)) % 256);
+  }
+}
+
+system("$xauth -f $xauthorityFile add $host:$displayNumber . $cookie");
+system("$xauth -f $xauthorityFile add $host/unix:$displayNumber . $cookie");
+if ($vncUserDirUnderTmp) {
+  system("$xauth merge $xauthorityFile");
+}
+
+# Now start the TurboVNC X server
+
+$cmd = $exedir."Xvnc :$displayNumber";
+$cmd .= " -dpi $dpi" if ($dpi);
+$cmd .= " -desktop " . &quotedString($desktopName);
+$cmd .= " -httpd $vncClasses" if ($enableHTTP && $vncClasses);
+$cmd .= " -auth $xauthorityFile";
+$cmd .= " -geometry $geometry" if ($geometry);
+$cmd .= " -depth $depth" if ($depth);
+$cmd .= " -pixelformat $pixelformat" if ($pixelformat);
+$cmd .= " -rfbwait 120000";
+$cmd .= " -rfbauth $passwdFile" if ($authTypeVNC);
+$cmd .= " -x509cert $x509CertFile" if ($encTypeX509);
+$cmd .= " -x509key $x509KeyFile" if ($encTypeX509);
+$cmd .= " -securitytypes \"$securityTypes\"" if ($securityTypes);
+$cmd .= " -rfbport $vncPort";
+$cmd .= " -fp $fontPath" if ($fontPath);
+$cmd .= " -alr ".$autoLosslessRefresh if ($autoLosslessRefresh > 0.0);
+$cmd .= " -deferupdate $deferUpdate";
+$cmd .= " -xkbdir $xkbdir" if ($xkbdir);
+$cmd .= " -xkbcompdir $xkbcompdir" if ($xkbcompdir);
+$cmd .= " -pamsession" if ($pamSession);
+$cmd .= " -dridir $dridir" if ($dridir);
+$cmd .= " -registrydir $registrydir" if ($registrydir);
+$cmd .= " -nomt" if (!$multiThread);
+$cmd .= " -nthreads $numThreads" if ($numThreads);
+$cmd .= " $serverArgs" if ($serverArgs);
+
+foreach $arg (@ARGV) {
+  $cmd .= " " . &quotedString($arg);
+}
+if (!$opt{'-debug'}) {
+  $cmd .= " >> " . &quotedString($desktopLog) . " 2>&1";
+}
+
+# Run $cmd and record the process ID.
+
+$pidFile = "$vncUserDir/$host:$displayNumber.pid";
+system("$cmd & echo \$! >$pidFile");
+
+# Give Xvnc a chance to start up
+
+sleep(1);
+unless (kill 0, `cat $pidFile`) {
+  warn "\nWARNING: The first attempt to start Xvnc failed, possibly because the vncserver\n";
+  warn "script was not able to figure out an appropriate X11 font path for this system\n";
+  warn "or because the font path you specified with the -fp argument was not valid.\n";
+  warn "Attempting to restart Xvnc using the X Font Server (xfs) ...\n";
+  $cmd =~ s@-fp [^ ]+@@;
+  $cmd .= " -fp $defFontPath" if ($defFontPath);
+  system("$cmd & echo \$! >$pidFile");
+  sleep(1);
+}
+unless (kill 0, `cat $pidFile`) {
+  warn "Could not start Xvnc.\n\n";
+  open(LOG, "<$desktopLog");
+  while (<LOG>) { print; }
+  close(LOG);
+  die "\n";
+}
+
+warn "\nDesktop '$desktopName' started on display $host:$displayNumber\n\n";
+
+if ($generateOTP == 1) {
+  warn "One-Time Password authentication enabled.  Generating initial OTP ...\n";
+
+  system($exedir."vncpasswd -o -display :$displayNumber");
+  if (($? & 0xFF00) != 0) {
+    print "Could not generate initial OTP.\n";
+    exit 1;
+  }
+
+  warn "Run '".$exedir."vncpasswd -o' from within the TurboVNC session or\n    '".$exedir."vncpasswd -o -display :$displayNumber' from within this shell\n    to generate additional OTPs\n";
+}
+
+# Create the user's xstartup script if necessary.
+
+if (!$skipxstartup) {
+  unless (-e "$xstartup" or $opt{'-xstartup'}) {
+    warn "Creating default startup script $xstartup\n";
+    open(XSTARTUP, ">$xstartup");
+    print XSTARTUP $defaultXStartup;
+    close(XSTARTUP);
+    chmod 0755, "$xstartup";
+  }
+
+  # Run the X startup script.
+
+  warn "Starting applications specified in $xstartup\n";
+  if ($wm) {
+    $ENV{TVNC_WM} = $wm;
+  }
+  if ($useVGL) {
+    warn "(Enabling VirtualGL)\n";
+    $ENV{TVNC_VGL} = "1";
+  }
+}
+warn "Log file is $desktopLog\n\n";
+
+# If the unix domain socket exists then use that (DISPLAY=:n) otherwise use
+# TCP (DISPLAY=host:n)
+
+if (-e "/tmp/.X11-unix/X$displayNumber") {
+  $ENV{DISPLAY} = ":$displayNumber";
+} else {
+  $ENV{DISPLAY} = "$host:$displayNumber";
+}
+$ENV{VNCDESKTOP} = $desktopName;
+$ENV{VGL_COMPRESS} = "0";
+
+if (!$skipxstartup) {
+  if ($opt{'-fg'}) {
+    system("$xstartup >> " . &quotedString($desktopLog) . " 2>&1");
+    if (kill 0, `cat $pidFile`) {
+      $opt{'-kill'} = ':'.$displayNumber;
+      &Kill();
+    }
+  } else {
+    if ($autokill) {
+      system("($xstartup; $0 -kill :$displayNumber) >> " .
+             &quotedString($desktopLog) . " 2>&1 &");
+    } else {
+      system("$xstartup >> " . &quotedString($desktopLog) . " 2>&1 &");
+    }
+  }
+}
+
+exit;
+
+
+###############################################################################
+#
+# CheckGeometryAndDepth simply makes sure that the geometry and depth values
+# are sensible.
+#
+
+sub CheckGeometryAndDepth
+{
+  foreach $tok (split/[,]/, $geometry) {
+    $width = -1;  $height = -1;  $x = 0;  $y = 0;
+
+    if ($tok =~ /^(\d+)x(\d+)$/) {
+      $width = $1;  $height = $2;
+    } elsif ($tok =~ /^(\d+)x(\d+)\+(\d+)$/) {
+      $width = $1;  $height = $2;  $x = $3;
+    } elsif ($tok =~ /^(\d+)x(\d+)\+(\d+)\+(\d+)$/) {
+      $width = $1;  $height = $2;  $x = $3;  $y = $4;
+    }
+
+    if (($width < 1) || ($height < 1)) {
+      die "$prog: geometry $tok is invalid\n";
+    }
+  }
+
+  if (($depth < 8) || ($depth > 32)) {
+    die "Depth must be between 8 and 32\n";
+  }
+}
+
+
+#
+# GetDisplayNumber gets the lowest available display number.  A display number
+# n is taken if something is listening on the VNC server port (5900+n) or the
+# X server port (6000+n).
+#
+
+sub GetDisplayNumber
+{
+  foreach $n (1..99) {
+    if (&CheckDisplayNumber($n)) {
+      return $n + 0;  # Bruce Mah's workaround for bug in perl 5.005_02
+    }
+  }
+
+  die "$prog: no free display number on $host.\n";
+}
+
+
+#
+# CheckDisplayNumber checks if the given display number is available.  A
+# display number n is taken if something is listening on the VNC server port
+# (5900+n) or the X server port (6000+n).
+#
+
+sub CheckDisplayNumber
+{
+  local ($n) = @_;
+
+  socket(S, $AF_INET, $SOCK_STREAM, 0) || die "$prog: socket failed: $!\n";
+  eval 'setsockopt(S, &SOL_SOCKET, &SO_REUSEADDR, pack("l", 1))';
+  unless (bind(S, pack('S n x12', $AF_INET, 6000 + $n))) {
+    close(S);
+    return 0;
+  }
+  close(S);
+
+  socket(S, $AF_INET, $SOCK_STREAM, 0) || die "$prog: socket failed: $!\n";
+  eval 'setsockopt(S, &SOL_SOCKET, &SO_REUSEADDR, pack("l", 1))';
+  unless (bind(S, pack('S n x12', $AF_INET, 5900 + $n))) {
+    close(S);
+    return 0;
+  }
+  close(S);
+
+  if (-e "/tmp/.X$n-lock") {
+    warn "\nWARNING: $host:$n is taken because of /tmp/.X$n-lock\n";
+    warn "Remove this file if there is no X server $host:$n\n";
+    return 0;
+  }
+
+  if (-e "/tmp/.X11-unix/X$n") {
+    warn "\nWARNING: $host:$n is taken because of /tmp/.X11-unix/X$n\n";
+    warn "Remove this file if there is no X server $host:$n\n";
+    return 0;
+  }
+
+  return 1;
+}
+
+
+#
+# GetXDisplayDefaults uses xdpyinfo to find out the geometry, depth and pixel
+# format of the current X display being used.  If successful, it sets the
+# options as appropriate so that the TurboVNC X server will use the same settings
+# (minus an allowance for window manager decorations on the geometry).  Using
+# the same depth and pixel format means that the VNC server won't have to
+# translate pixels when the desktop is being viewed on this X display (for
+# TrueColor displays anyway).
+#
+
+sub GetXDisplayDefaults
+{
+  local (@lines, @matchlines, $width, $height, $defaultVisualId, $i,
+         $red, $green, $blue);
+
+  $wmDecorationWidth = 4;       # a guess at typical size for window manager
+  $wmDecorationHeight = 24;     # decoration size
+
+  return unless (defined($ENV{DISPLAY}));
+
+  @lines = `xdpyinfo 2>/dev/null`;
+
+  return if ($? != 0);
+
+  @matchlines = grep(/dimensions/, @lines);
+  if (@matchlines) {
+    ($width, $height) = ($matchlines[0] =~ /(\d+)x(\d+) pixels/);
+
+    $width -= $wmDecorationWidth;
+    $height -= $wmDecorationHeight;
+
+    $geometry = "${width}x$height";
+  }
+
+  @matchlines = grep(/default visual id/, @lines);
+  if (@matchlines) {
+    ($defaultVisualId) = ($matchlines[0] =~ /id:\s+(\S+)/);
+
+    for ($i = 0; $i < @lines; $i++) {
+      if ($lines[$i] =~ /^\s*visual id:\s+$defaultVisualId$/) {
+        if (($lines[$i + 1] !~ /TrueColor/) ||
+            ($lines[$i + 2] !~ /depth/) ||
+            ($lines[$i + 4] !~ /red, green, blue masks/)) {
+          return;
+        }
+        last;
+      }
+    }
+
+    return if ($i >= @lines);
+
+    ($depth) = ($lines[$i + 2] =~ /depth:\s+(\d+)/);
+    ($red, $green, $blue) =
+      ($lines[$i + 4] =~
+       /masks:\s+0x([0-9a-f]+), 0x([0-9a-f]+), 0x([0-9a-f]+)/);
+
+    $red = hex($red);
+    $green = hex($green);
+    $blue = hex($blue);
+
+    if ($red > $blue) {
+      $red = int(log($red) / log(2)) - int(log($green) / log(2));
+      $green = int(log($green) / log(2)) - int(log($blue) / log(2));
+      $blue = int(log($blue) / log(2)) + 1;
+      $pixelformat = "rgb$red$green$blue";
+    } else {
+      $blue = int(log($blue) / log(2)) - int(log($green) / log(2));
+      $green = int(log($green) / log(2)) - int(log($red) / log(2));
+      $red = int(log($red) / log(2)) + 1;
+      $pixelformat = "bgr$blue$green$red";
+    }
+  }
+}
+
+
+#
+# quotedString returns a string which yields the original string when parsed
+# by a shell.
+#
+
+sub quotedString
+{
+  local ($in) = @_;
+
+  $in =~ s/\'/\'\"\'\"\'/g;
+
+  return "'$in'";
+}
+
+
+#
+# removeSlashes turns slashes into underscores for use as a file name.
+#
+
+sub removeSlashes
+{
+  local ($in) = @_;
+
+  $in =~ s|/|_|g;
+
+  return "$in";
+}
+
+
+#
+# Usage
+#
+
+sub Usage
+{
+  die("TurboVNC Server v2.2.7 (build 20211214)\n".
+      "\n".
+      "Usage: $prog [<OPTIONS>] [:<DISPLAY#>]\n".
+      "       $prog -kill :<DISPLAY#>\n".
+      "       $prog -list\n".
+      "\n".
+      "<OPTIONS> are Xvnc options, or:\n".
+      "\n".
+      "        -geometry <WIDTH>x<HEIGHT> or\n".
+      "        -geometry <W0>x<H0>+<X0>+<Y0>[,<W1>x<H1>+<X1>+<Y1>,...]\n".
+      "        -depth <DEPTH>\n".
+      "        -pixelformat rgb<NNN>\n".
+      "        -pixelformat bgr<NNN>\n".
+      "        -fp <FONT-PATH>\n".
+      "        -name <DESKTOP-NAME>\n".
+      "        -nohttpd\n".
+      "        -otp\n".
+      "        -fg\n".
+      "        -x509cert <CERT-FILE>\n".
+      "        -x509key <KEY-FILE>\n".
+      "        -autokill\n".
+      "        -noxstartup\n".
+      "        -xstartup <SCRIPT>\n".
+      "        -wm <SCRIPT>\n".
+      "        -vgl\n".
+      "        -log <FILE>\n".
+      "\n".
+      "See vncserver and Xvnc manual pages for more information.\n");
+}
+
+
+#
+# List
+#
+
+sub List
+{
+  opendir(dir, $vncUserDir);
+  my @filelist = readdir(dir);
+  closedir(dir);
+  print "\nTurboVNC sessions:\n\n";
+  print "X DISPLAY #\tPROCESS ID\n";
+  foreach my $file (@filelist) {
+    if ($file =~ /$host:(\d+)$\.pid/ && !&CheckDisplayNumber($1)) {
+      print ":".$1."\t\t".`cat $vncUserDir/$file`;
+    }
+  }
+  exit;
+}
+
+
+#
+# Kill
+#
+
+sub Kill
+{
+  $opt{'-kill'} =~ s/(:\d+)\.\d+$/$1/;  # e.g. turn :1.0 into :1
+
+  if ($opt{'-kill'} =~ /^:\d+$/) {
+    $pidFile = "$vncUserDir/$host$opt{'-kill'}.pid";
+  } else {
+    if ($opt{'-kill'} !~ /^$host:/) {
+      die "\nCan't tell if $opt{'-kill'} is on $host\n".
+          "Use -kill :<number> instead\n\n";
+    }
+    $pidFile = "$vncUserDir/$opt{'-kill'}.pid";
+  }
+
+  unless (-r $pidFile) {
+    die "\nCan't find file $pidFile\n".
+        "You'll have to kill the Xvnc process manually\n\n";
+  }
+
+  $SIG{'HUP'} = 'IGNORE';
+  chop($pid = `cat $pidFile`);
+  warn "Killing Xvnc process ID $pid\n";
+
+  if (kill 0, $pid) {
+    system("kill $pid");
+    sleep(1);
+    if (kill 0, $pid) {
+      print "Xvnc seems to be deadlocked.  Kill the process manually and then re-run\n";
+      print "    ".$0." -kill ".$opt{'-kill'}."\n";
+      print "to clean up the socket files.\n";
+      exit
+    }
+
+  } else {
+    warn "Xvnc process ID $pid already killed\n";
+    $opt{'-kill'} =~ s/://;
+
+    if (-e "/tmp/.X11-unix/X$opt{'-kill'}") {
+      print "Xvnc did not appear to shut down cleanly.";
+      print " Removing /tmp/.X11-unix/X$opt{'-kill'}\n";
+      unlink "/tmp/.X11-unix/X$opt{'-kill'}";
+    }
+    if (-e "/tmp/.X$opt{'-kill'}-lock") {
+      print "Xvnc did not appear to shut down cleanly.";
+      print " Removing /tmp/.X$opt{'-kill'}-lock\n";
+      unlink "/tmp/.X$opt{'-kill'}-lock";
+    }
+  }
+
+  unlink $pidFile;
+  exit;
+}
+
+
+#
+# ParseOptions takes a list of possible options and a boolean indicating
+# whether the option has a value following, and sets up an associative array
+# %opt of the values of the options given on the command line. It removes all
+# the arguments it uses from @ARGV and returns them in @optArgs.
+#
+
+sub ParseOptions
+{
+  local (@optval) = @_;
+  local ($opt, @opts, %valFollows, @newargs);
+
+  while (@optval) {
+    $opt = shift(@optval);
+    push(@opts, $opt);
+    $valFollows{$opt} = shift(@optval);
+  }
+
+  @optArgs = ();
+  %opt = ();
+
+arg:
+  while (defined($arg = shift(@ARGV))) {
+    foreach $opt (@opts) {
+      if (lc $arg eq $opt) {
+        push(@optArgs, $arg);
+        if ($valFollows{$opt}) {
+          if (@ARGV == 0) {
+            &Usage();
+          }
+          $opt{$opt} = shift(@ARGV);
+          push(@optArgs, $opt{$opt});
+        } else {
+          $opt{$opt} = 1;
+        }
+        next arg;
+      }
+    }
+    push(@newargs, $arg);
+  }
+
+  @ARGV = @newargs;
+}
+
+
+#
+# Routine to make sure we're operating in a sane environment.
+#
+
+sub SanityCheck
+{
+  local ($cmd);
+
+  #
+  # Get the program name
+  #
+
+  ($prog) = ($0 =~ m|([^/]+)$|);
+
+  #
+  # Check we have all the commands we'll need on the path.
+  #
+
+  cmd:
+  foreach $cmd ("uname") {
+    for (split(/:/, $ENV{PATH})) {
+      if (-x "$_/$cmd") {
+        next cmd;
+      }
+    }
+    die "$prog: couldn't find \"$cmd\" on your PATH.\n";
+  }
+  if (-x "/usr/X11R6/bin/xauth") {
+    $xauth = "/usr/X11R6/bin/xauth";
+  }
+  elsif (-x "/usr/openwin/bin/xauth") {
+    $xauth = "/usr/openwin/bin/xauth";
+  } else {
+  cmd1:
+    foreach $cmd ("xauth") {
+      for (split(/:/, $ENV{PATH})) {
+        if (-x "$_/$cmd") {
+          next cmd1;
+        }
+      }
+      die "$prog: couldn't find \"$cmd\" on your PATH.\n";
+    }
+  }
+
+cmd2:
+  foreach $cmd ($exedir."Xvnc", $exedir."vncpasswd") {
+    for (split(/:/, $ENV{PATH})) {
+      if (-x "$cmd") {
+        if (-d "$exedir/../java") {
+          $vncClasses = "$exedir/../java";
+        }
+        next cmd2;
+      }
+    }
+    die "$prog: couldn't find \"$cmd\".\n";
+  }
+
+  #
+  # Check the HOME and USER environment variables are both set.
+  #
+
+  unless (defined($ENV{HOME})) {
+    die "$prog: The HOME environment variable is not set.\n";
+  }
+#  unless (defined($ENV{USER})) {
+#    die "$prog: The USER environment variable is not set.\n";
+#  }
+
+  #
+  # Find socket constants. 'use Socket' is a perl5-ism, so we wrap it in an
+  # eval, and if it fails we try 'require "sys/socket.ph"'.  If this fails,
+  # we just guess at the values.  If you find perl moaning here, just
+  # hard-code the values of AF_INET and SOCK_STREAM.  You can find these out
+  # for your platform by looking in /usr/include/sys/socket.h and related
+  # files.
+  #
+
+  chop($os = `uname`);
+  chop($osrev = `uname -r`);
+
+  eval 'use Socket';
+  if ($@) {
+    eval 'require "sys/socket.ph"';
+    if ($@) {
+      if (($os eq "SunOS") && ($osrev !~ /^4/)) {
+        $AF_INET = 2;
+        $SOCK_STREAM = 2;
+      } else {
+        $AF_INET = 2;
+        $SOCK_STREAM = 1;
+      }
+    } else {
+      $AF_INET = &AF_INET;
+      $SOCK_STREAM = &SOCK_STREAM;
+    }
+  } else {
+    $AF_INET = &AF_INET;
+    $SOCK_STREAM = &SOCK_STREAM;
+  }
+}
+
+sub ReadConfiguration
+{
+  my @configurableVariables =
+    qw(geometry
+       depth
+       desktopName
+       dpi
+       vncClasses
+       vncUserDir
+       fontPath
+       securityTypes
+       generateOTP
+       autoLosslessRefresh
+       enableHTTP
+       wm
+       useVGL
+       autokill
+       pamSession
+       multiThread
+       numThreads
+       passwdFile
+       x509CertFile
+       x509KeyFile
+       serverArgs);
+
+  if (open CONF, "<$configFile") {
+    while (<CONF>) {
+      if (/^\s*\$(\w+)\s*=\s*(.*)$/) {
+        for my $var (@configurableVariables) {
+          if ($1 eq $var) {
+            eval $_;
+            last;
+          }
+        }
+      }
+    }
+    close CONF;
+  }
+}
+
+sub ReadAuthConfiguration($)
+{
+  my $acf = shift;
+  my $enableVNC = 0;
+  my $enableOTP = 0;
+  my $enableX509 = 0;
+  my $permissionsSet = 0;
+
+  return unless (open(ACF, $acf));
+
+  while (<ACF>) {
+    $_ =~ s/[\t\ \r\n]//g;
+    @tokens = split(/=/, $_);
+    if (@tokens[0] eq 'permitted-auth-methods') {
+      $permissionsSet = 1;
+      foreach $tok (split/[,=]/, $_) {
+        if (lc $tok eq 'otp') {
+          $enableOTP = 1;
+        }
+        if (lc $tok eq 'vnc') {
+          $enableVNC = 1;
+        }
+      }
+    }
+    if (@tokens[0] eq 'permitted-security-types') {
+      $permissionsSet = 1;
+      foreach $tok (split/[,=]/, $_) {
+        if (substr(lc $tok, -3) eq 'otp') {
+          $enableOTP = 1;
+        }
+        if (substr(lc $tok, -3) eq 'vnc') {
+          $enableVNC = 1;
+        }
+        if (substr(lc $tok, 0, 4) eq 'x509') {
+          $enableX509 = 1;
+        }
+      }
+    }
+  }
+
+  return unless ($permissionsSet == 1);
+
+  if ($enableVNC == 0) {
+    $authTypeVNC = 0;
+  }
+  if ($enableOTP == 0) {
+    $authTypeOTP = 0;
+  }
+  if ($enableX509 == 0) {
+    $encTypeX509 = 0;
+  }
+
+  close(ACF);
+}

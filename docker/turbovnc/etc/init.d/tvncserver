@@ -1,0 +1,170 @@
+#!/bin/bash
+#
+# chkconfig: - 91 35
+# description: Starts and stops the TurboVNC Server
+#
+### If you are using LDAP or another distributed authentication system, then
+### be sure to add any services needed for your distributed authentication
+### system to the Required-Start line below.
+#
+### BEGIN INIT INFO
+# Provides: tvncserver
+# Required-Start: $syslog
+# Required-Stop:
+# Default-Start: 2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: Starts and stops the TurboVNC Server
+### END INIT INFO
+
+# Source function library.
+REDHAT=0
+if [ -f /etc/rc.d/init.d/functions ]; then
+    . /etc/rc.d/init.d/functions
+    REDHAT=1
+else
+    if [ -f /lib/lsb/init-functions ]; then
+        . /lib/lsb/init-functions
+    else
+        echo "Unsupported platform"
+        exit 1
+    fi
+fi
+
+if [ $REDHAT -eq 1 ]; then
+    # Source networking configuration.
+    . /etc/sysconfig/network
+
+    # Check that networking is up.
+    [ "${NETWORKING}" = "no" ] && exit 0
+fi
+
+unset VNCSERVERARGS
+VNCSERVERS=""
+if [ -f /opt/TurboVNC/etc/sysconfig/tvncservers ]; then
+    . /opt/TurboVNC/etc/sysconfig/tvncservers
+fi
+
+LOCKDIR=/var/lock
+if [ -d /var/lock/subsys ]; then
+    LOCKDIR=/var/lock/subsys
+fi
+
+prog=$"TurboVNC server"
+
+start() {
+    echo -n $"Starting $prog: "
+    ulimit -S -c 0 >/dev/null 2>&1
+    RETVAL=NONE
+    for display in ${VNCSERVERS}
+    do
+        unset BASH_ENV ENV
+        DISP="${display%%:*}"
+        export VNCUSERARGS="${VNCSERVERARGS[${DISP}]}"
+        _OUT=`echo ${display}; su ${display##*:} -c "cd ~${display##*:} && /opt/TurboVNC/bin/vncserver :${display%%:*} -quiet ${VNCUSERARGS}" 2>&1`
+        _RETVAL=$?
+        if [[ ! $_OUT =~ "A VNC server is already running" ]]; then
+            RETVAL=$_RETVAL
+            echo -n "${display} "
+            logger -p local7.notice "$_OUT"
+        fi
+    done
+    if [ "$RETVAL" != "NONE" ]; then
+        if [ $REDHAT -eq 1 ]; then
+            [ "$RETVAL" -eq 0 ] && success $"vncserver startup" || \
+                failure $"vncserver start"
+        else
+            [ "$RETVAL" -eq 0 ] && log_success_msg "[  OK  ]" || \
+                log_failure_msg "[FAILED]"
+        fi
+        [ "$RETVAL" -eq 0 ] && touch $LOCKDIR/tvncserver
+    fi
+    echo
+}
+
+shutdown() {
+    echo -n $"Shutting down $prog: "
+    RETVAL=NONE
+    for display in ${VNCSERVERS}
+    do
+        echo -n "${display} "
+        unset BASH_ENV ENV
+        _OUT=`echo ${display}; su ${display##*:} -c "/opt/TurboVNC/bin/vncserver -kill :${display%%:*}" 2>&1`
+        RETVAL=$?
+        if [[ ! $_OUT =~ "You'll have to kill the Xvnc process manually" ]]; then
+            logger -p local7.notice "$_OUT"
+        fi
+    done
+    if [ "$RETVAL" != "NONE" ]; then
+        if [ $REDHAT -eq 1 ]; then
+            [ "$RETVAL" -eq 0 ] && success $"vncserver shutdown" || \
+                failure $"vncserver shutdown"
+        else
+            [ "$RETVAL" -eq 0 ] && log_success_msg "[  OK  ]" || \
+                log_failure_msg "[FAILED]"
+        fi
+    fi
+    echo
+}
+
+stop() {
+    shutdown
+    if [ "$RETVAL" != "NONE" ]; then
+        [ "$RETVAL" -eq 0 ] && rm -f $LOCKDIR/tvncserver
+    fi
+}
+
+reload() {
+    # Walk the process list and shut down any TurboVNC sessions that aren't
+    # specified in the tvncservers file.
+    for active in `ps uh -C Xvnc | grep /opt/TurboVNC/bin/Xvnc | awk '{ print $12, $16 }' | tr -d ':' | tr ' ' ':' | sed -e 's/(//' -e 's/)//'`
+    do
+        skip=
+        for display in ${VNCSERVERS}
+        do
+            if [[ $active == $display ]]; then
+                skip=1
+                break;
+             fi
+        done
+        if [[ ! -n $skip ]]; then
+             killlist+=("$active")
+        fi
+    done
+    VNCSERVERS_BAK=${VNCSERVERS}
+    VNCSERVERS=${killlist}
+    shutdown
+    VNCSERVERS=${VNCSERVERS_BAK}
+
+    # Start any TurboVNC sessions specified in the tvncservers file that
+    # haven't been started yet.
+    start
+}
+
+# See how we were called.
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        start
+        ;;
+    reload)
+        reload
+        ;;
+    condrestart)
+        if [ -f $LOCKDIR/tvncserver ]; then
+            stop
+            start
+        fi
+        ;;
+    status)
+        status Xvnc
+        ;;
+    *)
+        echo $"Usage: $0 {start|stop|restart|reload|condrestart|status}"
+        exit 1
+esac
