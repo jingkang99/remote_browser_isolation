@@ -18,6 +18,8 @@ rm -rf 1 2
   --disable-sync --disable-full-history-sync --disable-software-rasterizer --disable-plugins --no-report-upload --no-pings \
   --disable-plugins-discovery --disable-notifications --mute-audio --dns-prefetch-disable --remote-debugging-port=9222 \
   --disable-software-video-decoders --disable-print-preview --disable-breakpad --no-default-browser-check --noremote \
-  --no-experiments --no-service-autorun --bwsi --no-first-run $HOME_WEB_URL 2> /dev/null &
+  --no-experiments --no-service-autorun --bwsi --no-first-run --lang=zh-CN --enable-low-end-device-mode \
+  --renderer-process-limit=2 --disable-site-isolation-trials --disable-glsl-translator --disable-translate \
+  --disable-device-orientation --disable-internal-flash --purge-memory-button --disable-seccomp-sandbox $HOME_WEB_URL &
   
 /etc/init.d/supervisor start

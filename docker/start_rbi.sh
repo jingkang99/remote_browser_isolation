@@ -14,10 +14,14 @@ pkill openbox
 pkill python3
 pkill novnc_proxy
 
+/etc/init.d/dbus start
+
 VNC_SECURITY=''
 if [[ $VNC_PASSWORD =~ none ]]; then
     # start vnc without password
     VNC_SECURITY=' -securitytypes none'
+else
+    echo $VNC_PASSWORD | /opt/zeroadmin/turbovnc/bin/vncpasswd -f > /root/.vnc/passwd
 fi
 
 VNC_GEOMETRY=$(echo $CHMWIND_SIZE | sed 's/,/x/')
@@ -50,4 +54,3 @@ if [[ $GO_WEB_NOVNC == 1 ]]; then
 else
     /opt/zeroadmin/novnc/utils/novnc_proxy --vnc 0.0.0.0:$VNC_LSTPORT --listen $VNC_WEBPORT
 fi
-

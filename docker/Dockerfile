@@ -18,9 +18,11 @@ ENV DEBIAN_FRONTEND="noninteractive" \
     VNC_WINTITLE="SecureZ"  \
     VNC_GEOMETRY=1280x900   \
     CHMWIND_SIZE=1280,900   \
+    CHROME_OPTNS=''         \
     VNC_BKGCOLOR=#002B36    \
     VNC_VIEWONLY=true       \
     KILL_OPENBOX=1          \
+    LIMIT_CHMTAB=3          \
     GO_WEB_NOVNC=0          \
     HOME_WEB_URL=example.com \
     UNGOOGLE_CHM=http://download.opensuse.org/repositories/home:/ungoogled_chromium/Ubuntu_Focal/amd64/
@@ -34,6 +36,8 @@ COPY turbovnc     /opt/zeroadmin/turbovnc
 COPY websockify   /opt/zeroadmin/websockify
 COPY start_rbi.sh /opt/zeroadmin/start_rbi.sh
 COPY start_chm.sh /opt/zeroadmin/start_chm.sh
+COPY limit_tab.sh /opt/zeroadmin/limit_tab.sh
+COPY chrome-tabct /opt/zeroadmin/chrome-tabct
 COPY secure-novnc /opt/zeroadmin/secure-novnc
 
 RUN    apt update 2>/dev/null | grep packages | cut -d '.' -f 1  \
