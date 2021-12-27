@@ -42,7 +42,7 @@ fi
 . /etc/bash.bashrc
 
 /bin/bash /opt/zeroadmin/start_chm.sh
-sleep 6
+sleep 4
 pkill chrome
 
 echo "supervisor start"
