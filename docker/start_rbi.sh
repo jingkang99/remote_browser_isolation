@@ -14,7 +14,7 @@ pkill openbox
 pkill python3
 pkill novnc_proxy
 
-/etc/init.d/dbus start
+/etc/init.d/dbus restart
 
 VNC_SECURITY=''
 if [[ $VNC_PASSWORD =~ none ]]; then
@@ -40,10 +40,6 @@ if [[ $KILL_OPENBOX == 1 ]]; then
 fi
 
 . /etc/bash.bashrc
-
-/bin/bash /opt/zeroadmin/start_chm.sh
-sleep 4
-pkill chrome
 
 echo "supervisor start"
 /etc/init.d/supervisor start
