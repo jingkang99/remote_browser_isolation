@@ -40,33 +40,27 @@ COPY limit_tab.sh /opt/zeroadmin/limit_tab.sh
 COPY chrome-tabct /opt/zeroadmin/chrome-tabct
 COPY secure-novnc /opt/zeroadmin/secure-novnc
 
+WORKDIR /opt/zeroadmin
+
 RUN    apt update 2>/dev/null | grep packages | cut -d '.' -f 1  \
     && apt upgrade -y 2>/dev/null \
     && apt install -y --no-install-recommends apt-utils  \
         net-tools xz-utils sed unzip procps curl wget jq \
-        bzip2 dumb-init gnupg ca-certificates  \
+        bzip2 dumb-init gnupg ca-certificates supervisor \
         libgbm-dev libasound2 libnss3 libnss-wrapper libpam-oath \
         openbox xauth libxcb-xkb1 x11-xkb-utils fonts-wqy-zenhei \
         appmenu-gtk2-module appmenu-gtk3-module stterm hsetroot  \
         libasyncns0 libatomic1 libevent-2.1-7 libflac8 libjsoncpp1    \
         libminizip1 libogg0 libopenjp2-7 libopus0 libpulse0 libre2-5  \
         libsnappy1v5 libsndfile1 libvorbis0a libvorbisenc2 libwrap0   \
-        libxslt1.1 libwebpmux3 libxshmfence1 libwebpdemux2 supervisor \
-    && apt autoclean  -y \
-    && apt autoremove -y \
-    && rm -rf /var/cache/* /var/log/apt/* /var/lib/apt/lists/* \
-    && rm -rf /var/log/*   /tmp/* \
+        libxslt1.1 libwebpmux3 libxshmfence1 libwebpdemux2 \
     && useradd -ms /bin/bash -G users,sudo zeroadmin \
-    && mkdir -p /root/.config/chromium/Default
-
-WORKDIR /opt/zeroadmin
-
-# apt is slow to download #RUN    apt install -y ungoogled-chromium
-RUN    wget ${UNGOOGLE_CHM}`curl -s http://download.opensuse.org/repositories/home:/ungoogled_chromium/Ubuntu_Focal/amd64/ \
+    && mkdir -p /root/.config/chromium/Default \
+    && wget ${UNGOOGLE_CHM}`curl -s http://download.opensuse.org/repositories/home:/ungoogled_chromium/Ubuntu_Focal/amd64/ \
        | grep _amd64.deb | cut  -d '"' -f 4` 2>/dev/null \
     && dpkg -i ungoogled-chromium*.deb \
     && rm -rf  ungoogled-chromium*.deb \
-    && apt purge -y curl wget xz-utils gnupg-utils bzip2 \
+    && apt purge -y curl wget xz-utils gnupg bzip2 \
     && apt autoclean  -y \
     && apt autoremove -y \
     && rm -rf /var/cache/* /var/log/apt/* /var/lib/apt/lists/* \
